@@ -1,0 +1,1618 @@
+Only in .: all.out
+diff ./core.c /home/tak/jolp_l/jutak/linux/drivers/lightnvm/core.c
+48,53d47
+< struct nvm_area {
+< 	struct list_head list;
+< 	sector_t begin;
+< 	sector_t end;	/* end is excluded */
+< };
+< 
+64a59,82
+> static bool nvm_target_exists(const char *name)
+> {
+> 	struct nvm_dev *dev;
+> 	struct nvm_target *tgt;
+> 	bool ret = false;
+> 
+> 	down_write(&nvm_lock);
+> 	list_for_each_entry(dev, &nvm_devices, devices) {
+> 		mutex_lock(&dev->mlock);
+> 		list_for_each_entry(tgt, &dev->targets, list) {
+> 			if (!strcmp(name, tgt->disk->disk_name)) {
+> 				ret = true;
+> 				mutex_unlock(&dev->mlock);
+> 				goto out;
+> 			}
+> 		}
+> 		mutex_unlock(&dev->mlock);
+> 	}
+> 
+> out:
+> 	up_write(&nvm_lock);
+> 	return ret;
+> }
+> 
+107c125
+< 				int lunid = (ch * dev->geo.luns_per_chnl) + lun;
+---
+> 				int lunid = (ch * dev->geo.nr_luns) + lun;
+125c143,144
+< 					      int lun_begin, int lun_end)
+---
+> 					      u16 lun_begin, u16 lun_end,
+> 					      u16 op)
+133,136c152,155
+< 	int nr_chnls = nr_luns / dev->geo.luns_per_chnl;
+< 	int nr_chnls_mod = nr_luns % dev->geo.luns_per_chnl;
+< 	int bch = lun_begin / dev->geo.luns_per_chnl;
+< 	int blun = lun_begin % dev->geo.luns_per_chnl;
+---
+> 	int nr_chnls = nr_luns / dev->geo.nr_luns;
+> 	int nr_chnls_mod = nr_luns % dev->geo.nr_luns;
+> 	int bch = lun_begin / dev->geo.nr_luns;
+> 	int blun = lun_begin % dev->geo.nr_luns;
+157,158c176,177
+< 	prev_nr_luns = (luns_left > dev->geo.luns_per_chnl) ?
+< 					dev->geo.luns_per_chnl : luns_left;
+---
+> 	prev_nr_luns = (luns_left > dev->geo.nr_luns) ?
+> 					dev->geo.nr_luns : luns_left;
+164,165c183,184
+< 		int luns_in_chnl = (luns_left > dev->geo.luns_per_chnl) ?
+< 					dev->geo.luns_per_chnl : luns_left;
+---
+> 		int luns_in_chnl = (luns_left > dev->geo.nr_luns) ?
+> 					dev->geo.nr_luns : luns_left;
+202,203c221,223
+< 	tgt_dev->geo.nr_luns = nr_luns;
+< 	tgt_dev->geo.luns_per_chnl = (lun_balanced) ? prev_nr_luns : -1;
+---
+> 	tgt_dev->geo.all_luns = nr_luns;
+> 	tgt_dev->geo.nr_luns = (lun_balanced) ? prev_nr_luns : -1;
+> 	tgt_dev->geo.op = op;
+229c249
+< static struct nvm_tgt_type *nvm_find_target_type(const char *name, int lock)
+---
+> static struct nvm_tgt_type *__nvm_find_target_type(const char *name)
+231c251
+< 	struct nvm_tgt_type *tmp, *tt = NULL;
+---
+> 	struct nvm_tgt_type *tt;
+233,234c253,255
+< 	if (lock)
+< 		down_write(&nvm_tgtt_lock);
+---
+> 	list_for_each_entry(tt, &nvm_tgt_types, list)
+> 		if (!strcmp(name, tt->name))
+> 			return tt;
+236,240c257,266
+< 	list_for_each_entry(tmp, &nvm_tgt_types, list)
+< 		if (!strcmp(name, tmp->name)) {
+< 			tt = tmp;
+< 			break;
+< 		}
+---
+> 	return NULL;
+> }
+> 
+> static struct nvm_tgt_type *nvm_find_target_type(const char *name)
+> {
+> 	struct nvm_tgt_type *tt;
+> 
+> 	down_write(&nvm_tgtt_lock);
+> 	tt = __nvm_find_target_type(name);
+> 	up_write(&nvm_tgtt_lock);
+242,243d267
+< 	if (lock)
+< 		up_write(&nvm_tgtt_lock);
+246a271,318
+> static int nvm_config_check_luns(struct nvm_geo *geo, int lun_begin,
+> 				 int lun_end)
+> {
+> 	if (lun_begin > lun_end || lun_end >= geo->all_luns) {
+> 		pr_err("nvm: lun out of bound (%u:%u > %u)\n",
+> 			lun_begin, lun_end, geo->all_luns - 1);
+> 		return -EINVAL;
+> 	}
+> 
+> 	return 0;
+> }
+> 
+> static int __nvm_config_simple(struct nvm_dev *dev,
+> 			       struct nvm_ioctl_create_simple *s)
+> {
+> 	struct nvm_geo *geo = &dev->geo;
+> 
+> 	if (s->lun_begin == -1 && s->lun_end == -1) {
+> 		s->lun_begin = 0;
+> 		s->lun_end = geo->all_luns - 1;
+> 	}
+> 
+> 	return nvm_config_check_luns(geo, s->lun_begin, s->lun_end);
+> }
+> 
+> static int __nvm_config_extended(struct nvm_dev *dev,
+> 				 struct nvm_ioctl_create_extended *e)
+> {
+> 	struct nvm_geo *geo = &dev->geo;
+> 
+> 	if (e->lun_begin == 0xFFFF && e->lun_end == 0xFFFF) {
+> 		e->lun_begin = 0;
+> 		e->lun_end = dev->geo.all_luns - 1;
+> 	}
+> 
+> 	/* op not set falls into target's default */
+> 	if (e->op == 0xFFFF)
+> 		e->op = NVM_TARGET_DEFAULT_OP;
+> 
+> 	if (e->op < NVM_TARGET_MIN_OP ||
+> 	    e->op > NVM_TARGET_MAX_OP) {
+> 		pr_err("nvm: invalid over provisioning value\n");
+> 		return -EINVAL;
+> 	}
+> 
+> 	return nvm_config_check_luns(geo, e->lun_begin, e->lun_end);
+> }
+> 
+249c321
+< 	struct nvm_ioctl_create_simple *s = &create->conf.s;
+---
+> 	struct nvm_ioctl_create_extended e;
+258c330,352
+< 	tt = nvm_find_target_type(create->tgttype, 1);
+---
+> 	switch (create->conf.type) {
+> 	case NVM_CONFIG_TYPE_SIMPLE:
+> 		ret = __nvm_config_simple(dev, &create->conf.s);
+> 		if (ret)
+> 			return ret;
+> 
+> 		e.lun_begin = create->conf.s.lun_begin;
+> 		e.lun_end = create->conf.s.lun_end;
+> 		e.op = NVM_TARGET_DEFAULT_OP;
+> 		break;
+> 	case NVM_CONFIG_TYPE_EXTENDED:
+> 		ret = __nvm_config_extended(dev, &create->conf.e);
+> 		if (ret)
+> 			return ret;
+> 
+> 		e = create->conf.e;
+> 		break;
+> 	default:
+> 		pr_err("nvm: config type not valid\n");
+> 		return -EINVAL;
+> 	}
+> 
+> 	tt = nvm_find_target_type(create->tgttype);
+264,268c358,360
+< 	mutex_lock(&dev->mlock);
+< 	t = nvm_find_target(dev, create->tgtname);
+< 	if (t) {
+< 		pr_err("nvm: target name already exists.\n");
+< 		mutex_unlock(&dev->mlock);
+---
+> 	if (nvm_target_exists(create->tgtname)) {
+> 		pr_err("nvm: target name already exists (%s)\n",
+> 							create->tgtname);
+271d362
+< 	mutex_unlock(&dev->mlock);
+273c364
+< 	ret = nvm_reserve_luns(dev, s->lun_begin, s->lun_end);
+---
+> 	ret = nvm_reserve_luns(dev, e.lun_begin, e.lun_end);
+283c374
+< 	tgt_dev = nvm_create_tgt_dev(dev, s->lun_begin, s->lun_end);
+---
+> 	tgt_dev = nvm_create_tgt_dev(dev, e.lun_begin, e.lun_end, e.op);
+353c444
+< 	nvm_release_luns_err(dev, s->lun_begin, s->lun_end);
+---
+> 	nvm_release_luns_err(dev, e.lun_begin, e.lun_end);
+423c514
+< 		int luns_in_chnl = dev->geo.luns_per_chnl;
+---
+> 		int luns_in_chnl = dev->geo.nr_luns;
+527,555d617
+< void nvm_part_to_tgt(struct nvm_dev *dev, sector_t *entries,
+< 		     int len)
+< {
+< 	struct nvm_geo *geo = &dev->geo;
+< 	struct nvm_dev_map *dev_rmap = dev->rmap;
+< 	u64 i;
+< 
+< 	for (i = 0; i < len; i++) {
+< 		struct nvm_ch_map *ch_rmap;
+< 		int *lun_roffs;
+< 		struct ppa_addr gaddr;
+< 		u64 pba = le64_to_cpu(entries[i]);
+< 		u64 diff;
+< 
+< 		if (!pba)
+< 			continue;
+< 
+< 		gaddr = linear_to_generic_addr(geo, pba);
+< 		ch_rmap = &dev_rmap->chnls[gaddr.g.ch];
+< 		lun_roffs = ch_rmap->lun_offs;
+< 
+< 		diff = ((ch_rmap->ch_off * geo->luns_per_chnl) +
+< 				(lun_roffs[gaddr.g.lun])) * geo->sec_per_lun;
+< 
+< 		entries[i] -= cpu_to_le64(diff);
+< 	}
+< }
+< EXPORT_SYMBOL(nvm_part_to_tgt);
+< 
+561c623
+< 	if (nvm_find_target_type(tt->name, 0))
+---
+> 	if (__nvm_find_target_type(tt->name))
+729,834d790
+< int nvm_erase_sync(struct nvm_tgt_dev *tgt_dev, struct ppa_addr *ppas,
+< 								int nr_ppas)
+< {
+< 	struct nvm_geo *geo = &tgt_dev->geo;
+< 	struct nvm_rq rqd;
+< 	int ret;
+< 
+< 	memset(&rqd, 0, sizeof(struct nvm_rq));
+< 
+< 	rqd.opcode = NVM_OP_ERASE;
+< 	rqd.flags = geo->plane_mode >> 1;
+< 
+< 	ret = nvm_set_rqd_ppalist(tgt_dev, &rqd, ppas, nr_ppas);
+< 	if (ret)
+< 		return ret;
+< 
+< 	ret = nvm_submit_io_sync(tgt_dev, &rqd);
+< 	if (ret) {
+< 		pr_err("rrpr: erase I/O submission failed: %d\n", ret);
+< 		goto free_ppa_list;
+< 	}
+< 
+< free_ppa_list:
+< 	nvm_free_rqd_ppalist(tgt_dev, &rqd);
+< 
+< 	return ret;
+< }
+< EXPORT_SYMBOL(nvm_erase_sync);
+< 
+< int nvm_get_l2p_tbl(struct nvm_tgt_dev *tgt_dev, u64 slba, u32 nlb,
+< 		    nvm_l2p_update_fn *update_l2p, void *priv)
+< {
+< 	struct nvm_dev *dev = tgt_dev->parent;
+< 
+< 	if (!dev->ops->get_l2p_tbl)
+< 		return 0;
+< 
+< 	return dev->ops->get_l2p_tbl(dev, slba, nlb, update_l2p, priv);
+< }
+< EXPORT_SYMBOL(nvm_get_l2p_tbl);
+< 
+< int nvm_get_area(struct nvm_tgt_dev *tgt_dev, sector_t *lba, sector_t len)
+< {
+< 	struct nvm_dev *dev = tgt_dev->parent;
+< 	struct nvm_geo *geo = &dev->geo;
+< 	struct nvm_area *area, *prev, *next;
+< 	sector_t begin = 0;
+< 	sector_t max_sectors = (geo->sec_size * dev->total_secs) >> 9;
+< 
+< 	if (len > max_sectors)
+< 		return -EINVAL;
+< 
+< 	area = kmalloc(sizeof(struct nvm_area), GFP_KERNEL);
+< 	if (!area)
+< 		return -ENOMEM;
+< 
+< 	prev = NULL;
+< 
+< 	spin_lock(&dev->lock);
+< 	list_for_each_entry(next, &dev->area_list, list) {
+< 		if (begin + len > next->begin) {
+< 			begin = next->end;
+< 			prev = next;
+< 			continue;
+< 		}
+< 		break;
+< 	}
+< 
+< 	if ((begin + len) > max_sectors) {
+< 		spin_unlock(&dev->lock);
+< 		kfree(area);
+< 		return -EINVAL;
+< 	}
+< 
+< 	area->begin = *lba = begin;
+< 	area->end = begin + len;
+< 
+< 	if (prev) /* insert into sorted order */
+< 		list_add(&area->list, &prev->list);
+< 	else
+< 		list_add(&area->list, &dev->area_list);
+< 	spin_unlock(&dev->lock);
+< 
+< 	return 0;
+< }
+< EXPORT_SYMBOL(nvm_get_area);
+< 
+< void nvm_put_area(struct nvm_tgt_dev *tgt_dev, sector_t begin)
+< {
+< 	struct nvm_dev *dev = tgt_dev->parent;
+< 	struct nvm_area *area;
+< 
+< 	spin_lock(&dev->lock);
+< 	list_for_each_entry(area, &dev->area_list, list) {
+< 		if (area->begin != begin)
+< 			continue;
+< 
+< 		list_del(&area->list);
+< 		spin_unlock(&dev->lock);
+< 		kfree(area);
+< 		return;
+< 	}
+< 	spin_unlock(&dev->lock);
+< }
+< EXPORT_SYMBOL(nvm_put_area);
+< 
+861c817
+< 	if (nr_blks != geo->blks_per_lun * geo->plane_mode)
+---
+> 	if (nr_blks != geo->nr_chks * geo->plane_mode)
+864c820
+< 	for (blk = 0; blk < geo->blks_per_lun; blk++) {
+---
+> 	for (blk = 0; blk < geo->nr_chks; blk++) {
+880c836
+< 	return geo->blks_per_lun;
+---
+> 	return geo->nr_chks;
+895,941d850
+< static int nvm_init_slc_tbl(struct nvm_dev *dev, struct nvm_id_group *grp)
+< {
+< 	struct nvm_geo *geo = &dev->geo;
+< 	int i;
+< 
+< 	dev->lps_per_blk = geo->pgs_per_blk;
+< 	dev->lptbl = kcalloc(dev->lps_per_blk, sizeof(int), GFP_KERNEL);
+< 	if (!dev->lptbl)
+< 		return -ENOMEM;
+< 
+< 	/* Just a linear array */
+< 	for (i = 0; i < dev->lps_per_blk; i++)
+< 		dev->lptbl[i] = i;
+< 
+< 	return 0;
+< }
+< 
+< static int nvm_init_mlc_tbl(struct nvm_dev *dev, struct nvm_id_group *grp)
+< {
+< 	int i, p;
+< 	struct nvm_id_lp_mlc *mlc = &grp->lptbl.mlc;
+< 
+< 	if (!mlc->num_pairs)
+< 		return 0;
+< 
+< 	dev->lps_per_blk = mlc->num_pairs;
+< 	dev->lptbl = kcalloc(dev->lps_per_blk, sizeof(int), GFP_KERNEL);
+< 	if (!dev->lptbl)
+< 		return -ENOMEM;
+< 
+< 	/* The lower page table encoding consists of a list of bytes, where each
+< 	 * has a lower and an upper half. The first half byte maintains the
+< 	 * increment value and every value after is an offset added to the
+< 	 * previous incrementation value
+< 	 */
+< 	dev->lptbl[0] = mlc->pairs[0] & 0xF;
+< 	for (i = 1; i < dev->lps_per_blk; i++) {
+< 		p = mlc->pairs[i >> 1];
+< 		if (i & 0x1) /* upper */
+< 			dev->lptbl[i] = dev->lptbl[i - 1] + ((p & 0xF0) >> 4);
+< 		else /* lower */
+< 			dev->lptbl[i] = dev->lptbl[i - 1] + (p & 0xF);
+< 	}
+< 
+< 	return 0;
+< }
+< 
+948a858,864
+> 	memcpy(&geo->ppaf, &id->ppaf, sizeof(struct nvm_addr_format));
+> 
+> 	if (grp->mtype != 0) {
+> 		pr_err("nvm: memory type not supported\n");
+> 		return -EINVAL;
+> 	}
+> 
+951c867
+< 	geo->luns_per_chnl = grp->num_lun;
+---
+> 	geo->nr_luns = grp->num_lun;
+953,958c869,874
+< 	/* Generic device values */
+< 	geo->pgs_per_blk = grp->num_pg;
+< 	geo->blks_per_lun = grp->num_blk;
+< 	geo->nr_planes = grp->num_pln;
+< 	geo->fpg_size = grp->fpg_sz;
+< 	geo->pfpg_size = grp->fpg_sz * grp->num_pln;
+---
+> 	/* Generic device geometry values */
+> 	geo->ws_min = grp->ws_min;
+> 	geo->ws_opt = grp->ws_opt;
+> 	geo->ws_seq = grp->ws_seq;
+> 	geo->ws_per_chk = grp->ws_per_chk;
+> 	geo->nr_chks = grp->num_chk;
+961d876
+< 	geo->sec_per_pg = grp->fpg_sz / grp->csecs;
+963,965d877
+< 	memcpy(&geo->ppaf, &id->ppaf, sizeof(struct nvm_addr_format));
+< 
+< 	geo->plane_mode = NVM_PLANE_SINGLE;
+968,978c880,887
+< 	if (grp->mpos & 0x020202)
+< 		geo->plane_mode = NVM_PLANE_DOUBLE;
+< 	if (grp->mpos & 0x040404)
+< 		geo->plane_mode = NVM_PLANE_QUAD;
+< 
+< 	if (grp->mtype != 0) {
+< 		pr_err("nvm: memory type not supported\n");
+< 		return -EINVAL;
+< 	}
+< 
+< 	/* calculated values */
+---
+> 	geo->sec_per_chk = grp->clba;
+> 	geo->sec_per_lun = geo->sec_per_chk * geo->nr_chks;
+> 	geo->all_luns = geo->nr_luns * geo->nr_chnls;
+> 
+> 	/* 1.2 spec device geometry values */
+> 	geo->plane_mode = 1 << geo->ws_seq;
+> 	geo->nr_planes = geo->ws_opt / geo->ws_min;
+> 	geo->sec_per_pg = geo->ws_min;
+980,982d888
+< 	geo->sec_per_blk = geo->sec_per_pl * geo->pgs_per_blk;
+< 	geo->sec_per_lun = geo->sec_per_blk * geo->blks_per_lun;
+< 	geo->nr_luns = geo->luns_per_chnl * geo->nr_chnls;
+984,985c890,891
+< 	dev->total_secs = geo->nr_luns * geo->sec_per_lun;
+< 	dev->lun_map = kcalloc(BITS_TO_LONGS(geo->nr_luns),
+---
+> 	dev->total_secs = geo->all_luns * geo->sec_per_lun;
+> 	dev->lun_map = kcalloc(BITS_TO_LONGS(geo->all_luns),
+990,1008d895
+< 	switch (grp->fmtype) {
+< 	case NVM_ID_FMTYPE_SLC:
+< 		if (nvm_init_slc_tbl(dev, grp)) {
+< 			ret = -ENOMEM;
+< 			goto err_fmtype;
+< 		}
+< 		break;
+< 	case NVM_ID_FMTYPE_MLC:
+< 		if (nvm_init_mlc_tbl(dev, grp)) {
+< 			ret = -ENOMEM;
+< 			goto err_fmtype;
+< 		}
+< 		break;
+< 	default:
+< 		pr_err("nvm: flash type not supported\n");
+< 		ret = -EINVAL;
+< 		goto err_fmtype;
+< 	}
+< 
+1034d920
+< 	kfree(dev->lptbl);
+1065,1066c951,952
+< 			geo->pgs_per_blk, geo->blks_per_lun,
+< 			geo->nr_luns, geo->nr_chnls);
+---
+> 			geo->ws_per_chk, geo->nr_chks,
+> 			geo->all_luns, geo->nr_chnls);
+1138d1023
+< 	struct nvm_ioctl_create_simple *s;
+1149,1165d1033
+< 	if (create->conf.type != NVM_CONFIG_TYPE_SIMPLE) {
+< 		pr_err("nvm: config type not valid\n");
+< 		return -EINVAL;
+< 	}
+< 	s = &create->conf.s;
+< 
+< 	if (s->lun_begin == -1 && s->lun_end == -1) {
+< 		s->lun_begin = 0;
+< 		s->lun_end = dev->geo.nr_luns - 1;
+< 	}
+< 
+< 	if (s->lun_begin > s->lun_end || s->lun_end >= dev->geo.nr_luns) {
+< 		pr_err("nvm: lun out of bound (%u:%u > %u)\n",
+< 			s->lun_begin, s->lun_end, dev->geo.nr_luns - 1);
+< 		return -EINVAL;
+< 	}
+< 
+1263a1132,1137
+> 
+> 	if (create.conf.type == NVM_CONFIG_TYPE_EXTENDED &&
+> 	    create.conf.e.rsv != 0) {
+> 		pr_err("nvm: reserved config field in use\n");
+> 		return -EINVAL;
+> 	}
+diff ./Kconfig /home/tak/jolp_l/jutak/linux/drivers/lightnvm/Kconfig
+30,36d29
+< config NVM_RRPC
+< 	tristate "Round-robin Hybrid Open-Channel SSD target"
+< 	---help---
+< 	Allows an open-channel SSD to be exposed as a block device to the
+< 	host. The target is implemented using a linear mapping table and
+< 	cost-based garbage collection. It is optimized for 4K IO sizes.
+< 
+diff ./Makefile /home/tak/jolp_l/jutak/linux/drivers/lightnvm/Makefile
+7d6
+< obj-$(CONFIG_NVM_RRPC)		+= rrpc.o
+Only in .: out
+diff ./pblk-cache.c /home/tak/jolp_l/jutak/linux/drivers/lightnvm/pblk-cache.c
+21a22
+> 	struct request_queue *q = pblk->dev->q;
+23a25
+> 	unsigned long start_time = jiffies;
+27a30,31
+> 	generic_start_io_acct(q, WRITE, bio_sectors(bio), &pblk->disk->part0);
+> 
+69a74
+> 	generic_end_io_acct(q, WRITE, &pblk->disk->part0, start_time);
+diff ./pblk-core.c /home/tak/jolp_l/jutak/linux/drivers/lightnvm/pblk-core.c
+35,36c35,36
+< 		line = &pblk->lines[pblk_dev_ppa_to_line(*ppa)];
+< 		pos = pblk_dev_ppa_to_pos(&dev->geo, *ppa);
+---
+> 		line = &pblk->lines[pblk_ppa_to_line(*ppa)];
+> 		pos = pblk_ppa_to_pos(&dev->geo, *ppa);
+51c51
+< 	int pos = pblk_dev_ppa_to_pos(geo, *ppa);
+---
+> 	int pos = pblk_ppa_to_pos(geo, *ppa);
+69c69
+< 	line = &pblk->lines[pblk_dev_ppa_to_line(rqd->ppa_addr)];
+---
+> 	line = &pblk->lines[pblk_ppa_to_line(rqd->ppa_addr)];
+147c147
+< 	line_id = pblk_tgt_ppa_to_line(ppa);
+---
+> 	line_id = pblk_ppa_to_line(ppa);
+653c653
+< 			int pos = pblk_dev_ppa_to_pos(geo, ppa);
+---
+> 			int pos = pblk_ppa_to_pos(geo, ppa);
+671c671
+< 				pos = pblk_dev_ppa_to_pos(geo, ppa);
+---
+> 				pos = pblk_ppa_to_pos(geo, ppa);
+745c745
+< 	} else if (dir == PBLK_READ) {
+---
+> 	} else if (dir == PBLK_READ_RECOV || dir == PBLK_READ) {
+805c805
+< 		else
+---
+> 		else if (dir == PBLK_READ)
+819c819
+< 	return pblk_line_submit_smeta_io(pblk, line, bpaddr, PBLK_READ);
+---
+> 	return pblk_line_submit_smeta_io(pblk, line, bpaddr, PBLK_READ_RECOV);
+857,858c857,858
+< 					pblk_dev_ppa_to_line(ppa),
+< 					pblk_dev_ppa_to_pos(geo, ppa));
+---
+> 					pblk_ppa_to_line(ppa),
+> 					pblk_ppa_to_pos(geo, ppa));
+982c982
+< 	smeta_buf->window_wr_lun = cpu_to_le32(geo->nr_luns);
+---
+> 	smeta_buf->window_wr_lun = cpu_to_le32(geo->all_luns);
+1035c1035
+< 		line->sec_in_line -= geo->sec_per_blk;
+---
+> 		line->sec_in_line -= geo->sec_per_chk;
+1148c1148
+< 	pblk_rl_free_lines_dec(&pblk->rl, line);
+---
+> 	pblk_rl_free_lines_dec(&pblk->rl, line, true);
+1236c1236
+< 	pblk_rl_free_lines_dec(&pblk->rl, retry_line);
+---
+> 	pblk_rl_free_lines_dec(&pblk->rl, line, false);
+1255d1254
+< 	int is_next = 0;
+1283d1281
+< 		is_next = 1;
+1293,1296d1290
+< 	pblk_rl_free_lines_dec(&pblk->rl, line);
+< 	if (is_next)
+< 		pblk_rl_free_lines_dec(&pblk->rl, l_mg->data_next);
+< 
+1313a1308,1309
+> 	pblk_rl_free_lines_dec(&pblk->rl, line, true);
+> 
+1398d1393
+< 	int is_next = 0;
+1446a1442,1443
+> 	pblk_rl_free_lines_dec(&pblk->rl, new, true);
+> 
+1460d1456
+< 		is_next = 1;
+1464,1466d1459
+< 	if (is_next)
+< 		pblk_rl_free_lines_dec(&pblk->rl, l_mg->data_next);
+< 
+1564,1565c1557,1558
+< 					pblk_dev_ppa_to_line(ppa),
+< 					pblk_dev_ppa_to_pos(geo, ppa));
+---
+> 					pblk_ppa_to_line(ppa),
+> 					pblk_ppa_to_pos(geo, ppa));
+1749c1742
+< 	int nr_luns = geo->nr_luns;
+---
+> 	int nr_luns = geo->all_luns;
+1887c1880
+< 			int line_id = pblk_dev_ppa_to_line(ppa);
+---
+> 			int line_id = pblk_ppa_to_line(ppa);
+diff ./pblk-gc.c /home/tak/jolp_l/jutak/linux/drivers/lightnvm/pblk-gc.c
+27a28
+> // pblk->gc에서 w_list에 있는 요청을 꺼내서 gc_write를 실행
+31a33,35
+> 
+> 	//#define LIST_HEAD(name) \
+> 		struct list_head name = LIST_HEAD_INIT(name)
+38a43
+> 	// write할 것이 있다면 현재 gc->w_lock을 획득한 상태
+39a45,46
+> 	// list가 circular-doubly list이기 때문에, 
+> 	// 아래 명령은 gc->w_list를 전부 w_list에 옮기는게 아닐까
+44c51
+< 	list_for_each_entry_safe(gc_rq, tgc_rq, &w_list, list) {
+---
+> 	list_for_each_entry_safe(gc_rq, tgc_rq, &w_list, list) {		// tgc_rq == temporary_gc_rq
+48a56
+> 
+53a62
+> // gc_writer_ts를 시동하는 함수
+58a68
+> // 해당 line을 상황에 맞는 gc_list의 뒤에 붙임
+89c99
+< 	up(&gc->gc_sem);
+---
+> 	up(&gc->gc_sem);	// sema up
+172c182,189
+< 	lba_list = pblk_recov_get_lba_list(pblk, emeta_buf);
+---
+> 
+> 	ret = pblk_recov_check_emeta(pblk, emeta_buf);
+> 	if (ret) {
+> 		pr_err("pblk: inconsistent emeta (line %d)\n", line->id);
+> 		goto fail_free_emeta;
+> 	}
+> 
+> 	lba_list = emeta_to_lbas(pblk, emeta_buf);
+262a280,281
+> // 해당 line을 gc_reader_wq에 등재함
+> // 성공시 0
+288a308
+> // gc를 시동하는 함수(kick은 "~을 시작하는 함수"에 쓰임)
+303a324
+> // r_list의 첫 line에 대해 gc를 시작
+522,531d542
+< /*
+<  * If flush_wq == 1 then no lock should be held by the caller since
+<  * flush_workqueue can sleep
+<  */
+< static void pblk_gc_stop(struct pblk *pblk, int flush_wq)
+< {
+< 	pblk->gc.gc_active = 0;
+< 	pr_debug("pblk: gc stop\n");
+< }
+< 
+537c548
+< 		pblk_gc_stop(pblk, 0);
+---
+> 		gc->gc_active = 0;
+581a593,594
+> 	// ts : task struct
+> 	// kthread : kernel thread
+604a618,620
+> 	// timer modify
+> 	// cf) jiffy는 linux의 시간 단위
+> 	// http://hbisland.tistory.com/entry/kernel-시간관리
+610c626
+< 	gc->w_entries = 0;
+---
+> 	gc->w_entries = 0;			// TODO: w_entries의 의미?
+633a650
+> 	// lock을 잡는 순서가 중요할까?
+663c680
+< 	pblk_gc_stop(pblk, 1);
+---
+> 	gc->gc_active = 0;
+diff ./pblk.h /home/tak/jolp_l/jutak/linux/drivers/lightnvm/pblk.h
+54,57d53
+< #define pblk_for_each_lun(pblk, rlun, i) \
+< 		for ((i) = 0, rlun = &(pblk)->luns[0]; \
+< 			(i) < (pblk)->nr_luns; (i)++, rlun = &(pblk)->luns[(i)])
+< 
+60a57,58
+> #define PBLK_DEFAULT_OP (11)
+> 
+64a63
+> 	PBLK_READ_RECOV,		/* Recovery read - errors allowed */
+116a116
+> 	unsigned long start_time;
+173c173
+< 	unsigned int sync_point;	/* Sync point - last entry that must be
+---
+> 	unsigned int flush_point;	/* Sync point - last entry that must be
+196c196
+< 	atomic_t inflight_sync_point;	/* Not served REQ_FLUSH | REQ_FUA */
+---
+> 	atomic_t inflight_flush_point;	/* Not served REQ_FLUSH | REQ_FUA */
+227,229c227,229
+< 	int gc_active;
+< 	int gc_enabled;
+< 	int gc_forced;
+---
+> 	int gc_active;			// gc동작중인가?
+> 	int gc_enabled;			// gc가능한 상태인가?
+> 	int gc_forced;			// gc forced인가?
+235c235
+< 	struct workqueue_struct *gc_line_reader_wq;
+---
+> 	struct workqueue_struct *gc_line_reader_wq;		// TODO: line_reader vs reader?
+240a241
+> 								// TODO: inflight vs pipeline?
+247,248c248,249
+< 	struct list_head w_list;
+< 	struct list_head r_list;
+---
+> 	struct list_head w_list;	// write list?
+> 	struct list_head r_list;	// read list?
+259,261d259
+< 	unsigned int low;	/* Lower threshold for rate limiter (user I/O
+< 				 * rate limiter - stall)
+< 				 */
+295c293,295
+< 	atomic_t free_blocks;
+---
+> 
+> 	atomic_t free_blocks;		/* Total number of free blocks (+ OP) */
+> 	atomic_t free_user_blocks;	/* Number of user free blocks (no OP) */
+403,404c403,404
+< 					 * block line
+< 					 */
+---
+> 							 * block line
+> 							 */
+582,583c582,583
+< 			    * guarantee successful reads.
+< 			    */
+---
+> 			    		* guarantee successful reads.
+> 			    		*/
+586c586,588
+< 	int over_pct;      /* Percentage of device used for over-provisioning */
+---
+> 
+> 	int op;      /* Percentage of device used for over-provisioning */
+> 	int op_blks; /* Number of blocks used for over-provisioning */
+694c696
+< unsigned int pblk_rb_sync_point_count(struct pblk_rb *rb);
+---
+> unsigned int pblk_rb_flush_point_count(struct pblk_rb *rb);
+815c817
+< __le64 *pblk_recov_get_lba_list(struct pblk *pblk, struct line_emeta *emeta);
+---
+> int pblk_recov_check_emeta(struct pblk *pblk, struct line_emeta *emeta);
+845a848
+> unsigned long pblk_rl_nr_user_free_blks(struct pblk_rl *rl);
+854c857,858
+< void pblk_rl_free_lines_dec(struct pblk_rl *rl, struct pblk_line *line);
+---
+> void pblk_rl_free_lines_dec(struct pblk_rl *rl, struct pblk_line *line,
+> 			    bool used);
+910c914
+< 	return NVM_MEM_PAGE_WRITE * geo->nr_luns * geo->sec_per_pl;
+---
+> 	return NVM_MEM_PAGE_WRITE * geo->all_luns * geo->sec_per_pl;
+913c917
+< static inline int pblk_dev_ppa_to_line(struct ppa_addr p)
+---
+> static inline int pblk_ppa_to_line(struct ppa_addr p)
+918c922
+< static inline int pblk_tgt_ppa_to_line(struct ppa_addr p)
+---
+> static inline int pblk_ppa_to_pos(struct nvm_geo *geo, struct ppa_addr p)
+920c924
+< 	return p.g.blk;
+---
+> 	return p.g.lun * geo->nr_chnls + p.g.ch;
+923c927,928
+< static inline int pblk_ppa_to_pos(struct nvm_geo *geo, struct ppa_addr p)
+---
+> static inline struct ppa_addr addr_to_gen_ppa(struct pblk *pblk, u64 paddr,
+> 					      u64 line_id)
+925c930,940
+< 	return p.g.lun * geo->nr_chnls + p.g.ch;
+---
+> 	struct ppa_addr ppa;
+> 
+> 	ppa.ppa = 0;
+> 	ppa.g.blk = line_id;
+> 	ppa.g.pg = (paddr & pblk->ppaf.pg_mask) >> pblk->ppaf.pg_offset;
+> 	ppa.g.lun = (paddr & pblk->ppaf.lun_mask) >> pblk->ppaf.lun_offset;
+> 	ppa.g.ch = (paddr & pblk->ppaf.ch_mask) >> pblk->ppaf.ch_offset;
+> 	ppa.g.pl = (paddr & pblk->ppaf.pln_mask) >> pblk->ppaf.pln_offset;
+> 	ppa.g.sec = (paddr & pblk->ppaf.sec_mask) >> pblk->ppaf.sec_offset;
+> 
+> 	return ppa;
+928,929c943,944
+< /* A block within a line corresponds to the lun */
+< static inline int pblk_dev_ppa_to_pos(struct nvm_geo *geo, struct ppa_addr p)
+---
+> static inline u64 pblk_dev_ppa_to_line_addr(struct pblk *pblk,
+> 							struct ppa_addr p)
+931c946,954
+< 	return p.g.lun * geo->nr_chnls + p.g.ch;
+---
+> 	u64 paddr;
+> 
+> 	paddr = (u64)p.g.pg << pblk->ppaf.pg_offset;
+> 	paddr |= (u64)p.g.lun << pblk->ppaf.lun_offset;
+> 	paddr |= (u64)p.g.ch << pblk->ppaf.ch_offset;
+> 	paddr |= (u64)p.g.pl << pblk->ppaf.pln_offset;
+> 	paddr |= (u64)p.g.sec << pblk->ppaf.sec_offset;
+> 
+> 	return paddr;
+963,980d985
+< static inline struct ppa_addr pblk_trans_map_get(struct pblk *pblk,
+< 								sector_t lba)
+< {
+< 	struct ppa_addr ppa;
+< 
+< 	if (pblk->ppaf_bitsize < 32) {
+< 		u32 *map = (u32 *)pblk->trans_map;
+< 
+< 		ppa = pblk_ppa32_to_ppa64(pblk, map[lba]);
+< 	} else {
+< 		struct ppa_addr *map = (struct ppa_addr *)pblk->trans_map;
+< 
+< 		ppa = map[lba];
+< 	}
+< 
+< 	return ppa;
+< }
+< 
+1002,1003c1007,1008
+< static inline void pblk_trans_map_set(struct pblk *pblk, sector_t lba,
+< 						struct ppa_addr ppa)
+---
+> static inline struct ppa_addr pblk_trans_map_get(struct pblk *pblk,
+> 								sector_t lba)
+1004a1010,1011
+> 	struct ppa_addr ppa;
+> 
+1008c1015
+< 		map[lba] = pblk_ppa64_to_ppa32(pblk, ppa);
+---
+> 		ppa = pblk_ppa32_to_ppa64(pblk, map[lba]);
+1010c1017
+< 		u64 *map = (u64 *)pblk->trans_map;
+---
+> 		struct ppa_addr *map = (struct ppa_addr *)pblk->trans_map;
+1012c1019
+< 		map[lba] = ppa.ppa;
+---
+> 		ppa = map[lba];
+1013a1021,1022
+> 
+> 	return ppa;
+1016,1017c1025,1026
+< static inline u64 pblk_dev_ppa_to_line_addr(struct pblk *pblk,
+< 							struct ppa_addr p)
+---
+> static inline void pblk_trans_map_set(struct pblk *pblk, sector_t lba,
+> 						struct ppa_addr ppa)
+1019c1028,1029
+< 	u64 paddr;
+---
+> 	if (pblk->ppaf_bitsize < 32) {
+> 		u32 *map = (u32 *)pblk->trans_map;
+1021,1026c1031,1033
+< 	paddr = 0;
+< 	paddr |= (u64)p.g.pg << pblk->ppaf.pg_offset;
+< 	paddr |= (u64)p.g.lun << pblk->ppaf.lun_offset;
+< 	paddr |= (u64)p.g.ch << pblk->ppaf.ch_offset;
+< 	paddr |= (u64)p.g.pl << pblk->ppaf.pln_offset;
+< 	paddr |= (u64)p.g.sec << pblk->ppaf.sec_offset;
+---
+> 		map[lba] = pblk_ppa64_to_ppa32(pblk, ppa);
+> 	} else {
+> 		u64 *map = (u64 *)pblk->trans_map;
+1028c1035,1036
+< 	return paddr;
+---
+> 		map[lba] = ppa.ppa;
+> 	}
+1043,1046c1051
+< 	if (lppa.ppa == rppa.ppa)
+< 		return true;
+< 
+< 	return false;
+---
+> 	return (lppa.ppa == rppa.ppa);
+1069,1094d1073
+< static inline struct ppa_addr addr_to_gen_ppa(struct pblk *pblk, u64 paddr,
+< 					      u64 line_id)
+< {
+< 	struct ppa_addr ppa;
+< 
+< 	ppa.ppa = 0;
+< 	ppa.g.blk = line_id;
+< 	ppa.g.pg = (paddr & pblk->ppaf.pg_mask) >> pblk->ppaf.pg_offset;
+< 	ppa.g.lun = (paddr & pblk->ppaf.lun_mask) >> pblk->ppaf.lun_offset;
+< 	ppa.g.ch = (paddr & pblk->ppaf.ch_mask) >> pblk->ppaf.ch_offset;
+< 	ppa.g.pl = (paddr & pblk->ppaf.pln_mask) >> pblk->ppaf.pln_offset;
+< 	ppa.g.sec = (paddr & pblk->ppaf.sec_mask) >> pblk->ppaf.sec_offset;
+< 
+< 	return ppa;
+< }
+< 
+< static inline struct ppa_addr addr_to_pblk_ppa(struct pblk *pblk, u64 paddr,
+< 					 u64 line_id)
+< {
+< 	struct ppa_addr ppa;
+< 
+< 	ppa = addr_to_gen_ppa(pblk, paddr, line_id);
+< 
+< 	return ppa;
+< }
+< 
+1215c1194
+< 				ppa->g.lun < geo->luns_per_chnl &&
+---
+> 				ppa->g.lun < geo->nr_luns &&
+1217,1218c1196,1197
+< 				ppa->g.blk < geo->blks_per_lun &&
+< 				ppa->g.pg < geo->pgs_per_blk &&
+---
+> 				ppa->g.blk < geo->nr_chks &&
+> 				ppa->g.pg < geo->ws_per_chk &&
+1248c1227
+< 			line = &pblk->lines[pblk_dev_ppa_to_line(ppa)];
+---
+> 			line = &pblk->lines[pblk_ppa_to_line(ppa)];
+1289,1293d1267
+< }
+< 
+< static inline sector_t pblk_get_sector(sector_t lba)
+< {
+< 	return lba * NR_PHY_IN_LOG;
+diff ./pblk-init.c /home/tak/jolp_l/jutak/linux/drivers/lightnvm/pblk-init.c
+172,173c172,173
+< 	power_len = get_count_order(geo->luns_per_chnl);
+< 	if (1 << power_len != geo->luns_per_chnl) {
+---
+> 	power_len = get_count_order(geo->nr_luns);
+> 	if (1 << power_len != geo->nr_luns) {
+257c257
+< 						geo->nr_planes * geo->nr_luns;
+---
+> 						geo->nr_planes * geo->all_luns;
+273c273,274
+< 	pblk->rec_pool = mempool_create_slab_pool(geo->nr_luns, pblk_rec_cache);
+---
+> 	pblk->rec_pool = mempool_create_slab_pool(geo->all_luns,
+> 							pblk_rec_cache);
+277c278
+< 	pblk->r_rq_pool = mempool_create_slab_pool(geo->nr_luns,
+---
+> 	pblk->r_rq_pool = mempool_create_slab_pool(geo->all_luns,
+282c283
+< 	pblk->e_rq_pool = mempool_create_slab_pool(geo->nr_luns,
+---
+> 	pblk->e_rq_pool = mempool_create_slab_pool(geo->all_luns,
+287c288
+< 	pblk->w_rq_pool = mempool_create_slab_pool(geo->nr_luns,
+---
+> 	pblk->w_rq_pool = mempool_create_slab_pool(geo->all_luns,
+356a358,359
+> 	pblk_rwb_free(pblk);
+> 
+412c415
+< 	nr_blks = geo->blks_per_lun * geo->plane_mode;
+---
+> 	nr_blks = geo->nr_chks * geo->plane_mode;
+485c488
+< 	if (geo->luns_per_chnl < 0) {
+---
+> 	if (geo->nr_luns < 0) {
+490c493,494
+< 	pblk->luns = kcalloc(geo->nr_luns, sizeof(struct pblk_lun), GFP_KERNEL);
+---
+> 	pblk->luns = kcalloc(geo->all_luns, sizeof(struct pblk_lun),
+> 								GFP_KERNEL);
+494c498
+< 	for (i = 0; i < geo->nr_luns; i++) {
+---
+> 	for (i = 0; i < geo->all_luns; i++) {
+498c502
+< 		int lunid = lun_raw + ch * geo->luns_per_chnl;
+---
+> 		int lunid = lun_raw + ch * geo->nr_luns;
+579a584,585
+> 	struct pblk_line_mgmt *l_mg = &pblk->l_mg;
+> 	struct pblk_line_meta *lm = &pblk->lm;
+581a588
+> 	int sec_meta, blk_meta;
+583c590,593
+< 	pblk->over_pct = 20;
+---
+> 	if (geo->op == NVM_TARGET_DEFAULT_OP)
+> 		pblk->op = PBLK_DEFAULT_OP;
+> 	else
+> 		pblk->op = geo->op;
+586c596
+< 	provisioned *= (100 - pblk->over_pct);
+---
+> 	provisioned *= (100 - pblk->op);
+588a599,600
+> 	pblk->op_blks = nr_free_blks - provisioned;
+> 
+593,594c605,612
+< 	pblk->rl.nr_secs = nr_free_blks * geo->sec_per_blk;
+< 	pblk->capacity = provisioned * geo->sec_per_blk;
+---
+> 	pblk->rl.nr_secs = nr_free_blks * geo->sec_per_chk;
+> 
+> 	/* Consider sectors used for metadata */
+> 	sec_meta = (lm->smeta_sec + lm->emeta_sec[0]) * l_mg->nr_free_lines;
+> 	blk_meta = DIV_ROUND_UP(sec_meta, geo->sec_per_chk);
+> 
+> 	pblk->capacity = (provisioned - blk_meta) * geo->sec_per_chk;
+> 
+595a614
+> 	atomic_set(&pblk->rl.free_user_blocks, nr_free_blks);
+686c705
+< 	max_write_ppas = pblk->min_write_pgs * geo->nr_luns;
+---
+> 	max_write_ppas = pblk->min_write_pgs * geo->all_luns;
+696c715
+< 	div_u64_rem(geo->sec_per_blk, pblk->min_write_pgs, &mod);
+---
+> 	div_u64_rem(geo->sec_per_chk, pblk->min_write_pgs, &mod);
+702c721
+< 	l_mg->nr_lines = geo->blks_per_lun;
+---
+> 	l_mg->nr_lines = geo->nr_chks;
+708,710c727,729
+< 	lm->sec_per_line = geo->sec_per_blk * geo->nr_luns;
+< 	lm->blk_per_line = geo->nr_luns;
+< 	lm->blk_bitmap_len = BITS_TO_LONGS(geo->nr_luns) * sizeof(long);
+---
+> 	lm->sec_per_line = geo->sec_per_chk * geo->all_luns;
+> 	lm->blk_per_line = geo->all_luns;
+> 	lm->blk_bitmap_len = BITS_TO_LONGS(geo->all_luns) * sizeof(long);
+712c731
+< 	lm->lun_bitmap_len = BITS_TO_LONGS(geo->nr_luns) * sizeof(long);
+---
+> 	lm->lun_bitmap_len = BITS_TO_LONGS(geo->all_luns) * sizeof(long);
+715c734
+< 	lm->meta_distance = (geo->nr_luns / 2) * pblk->min_write_pgs;
+---
+> 	lm->meta_distance = (geo->all_luns / 2) * pblk->min_write_pgs;
+745c764
+< 	lm->emeta_bb = geo->nr_luns > i ? geo->nr_luns - i : 0;
+---
+> 	lm->emeta_bb = geo->all_luns > i ? geo->all_luns - i : 0;
+748c767
+< 	if (geo->nr_luns > 1)
+---
+> 	if (geo->all_luns > 1)
+750c769
+< 					lm->emeta_sec[0], geo->sec_per_blk);
+---
+> 					lm->emeta_sec[0], geo->sec_per_chk);
+775c794
+< 	bb_distance = (geo->nr_luns) * geo->sec_per_pl;
+---
+> 	bb_distance = (geo->all_luns) * geo->sec_per_pl;
+847c866
+< 	for (i = 0; i < geo->nr_luns; i++)
+---
+> 	for (i = 0; i < geo->all_luns; i++)
+861c880
+< 	for (i = 0; i < geo->nr_luns; i++)
+---
+> 	for (i = 0; i < geo->all_luns; i++)
+869,871d887
+< 	timer_setup(&pblk->wtimer, pblk_write_timer_fn, 0);
+< 	mod_timer(&pblk->wtimer, jiffies + msecs_to_jiffies(100));
+< 
+874,875c890,895
+< 		pr_err("pblk: could not allocate writer kthread\n");
+< 		return PTR_ERR(pblk->writer_ts);
+---
+> 		int err = PTR_ERR(pblk->writer_ts);
+> 
+> 		if (err != -EINTR)
+> 			pr_err("pblk: could not allocate writer kthread (%d)\n",
+> 					err);
+> 		return err;
+877a898,900
+> 	timer_setup(&pblk->wtimer, pblk_write_timer_fn, 0);
+> 	mod_timer(&pblk->wtimer, jiffies + msecs_to_jiffies(100));
+> 
+913d935
+< 	pblk_rwb_free(pblk);
+1028c1050,1051
+< 		pr_err("pblk: could not initialize write thread\n");
+---
+> 		if (ret != -EINTR)
+> 			pr_err("pblk: could not initialize write thread\n");
+1044c1067
+< 	tqueue->limits.discard_granularity = geo->pgs_per_blk * geo->pfpg_size;
+---
+> 	tqueue->limits.discard_granularity = geo->sec_per_chk * geo->sec_size;
+1049,1050c1072,1074
+< 	pr_info("pblk init: luns:%u, lines:%d, secs:%llu, buf entries:%u\n",
+< 			geo->nr_luns, pblk->l_mg.nr_lines,
+---
+> 	pr_info("pblk(%s): luns:%u, lines:%d, secs:%llu, buf entries:%u\n",
+> 			tdisk->disk_name,
+> 			geo->all_luns, pblk->l_mg.nr_lines,
+diff ./pblk-map.c /home/tak/jolp_l/jutak/linux/drivers/lightnvm/pblk-map.c
+149c149
+< 	if (unlikely(ppa_empty(*erase_ppa)) &&
+---
+> 	if (unlikely(pblk_ppa_empty(*erase_ppa)) &&
+diff ./pblk-rb.c /home/tak/jolp_l/jutak/linux/drivers/lightnvm/pblk-rb.c
+57c57
+< 	rb->sync_point = EMPTY_ENTRY;
+---
+> 	rb->flush_point = EMPTY_ENTRY;
+115c115
+< 	atomic_set(&rb->inflight_sync_point, 0);
+---
+> 	atomic_set(&rb->inflight_flush_point, 0);
+229c229
+< 		line = &pblk->lines[pblk_tgt_ppa_to_line(w_ctx->ppa)];
+---
+> 		line = &pblk->lines[pblk_ppa_to_line(w_ctx->ppa)];
+352c352
+< static int pblk_rb_sync_point_set(struct pblk_rb *rb, struct bio *bio,
+---
+> static int pblk_rb_flush_point_set(struct pblk_rb *rb, struct bio *bio,
+356c356
+< 	unsigned int subm, sync_point;
+---
+> 	unsigned int sync, flush_point;
+358c358,361
+< 	subm = READ_ONCE(rb->subm);
+---
+> 	sync = READ_ONCE(rb->sync);
+> 
+> 	if (pos == sync)
+> 		return 0;
+361c364
+< 	atomic_inc(&rb->inflight_sync_point);
+---
+> 	atomic_inc(&rb->inflight_flush_point);
+364,365c367,368
+< 	if (pos == subm)
+< 		return 0;
+---
+> 	flush_point = (pos == 0) ? (rb->nr_entries - 1) : (pos - 1);
+> 	entry = &rb->entries[flush_point];
+367,368c370
+< 	sync_point = (pos == 0) ? (rb->nr_entries - 1) : (pos - 1);
+< 	entry = &rb->entries[sync_point];
+---
+> 	pblk_rb_sync_init(rb, NULL);
+370,371c372,373
+< 	/* Protect syncs */
+< 	smp_store_release(&rb->sync_point, sync_point);
+---
+> 	/* Protect flush points */
+> 	smp_store_release(&rb->flush_point, flush_point);
+373,374c375,376
+< 	if (!bio)
+< 		return 0;
+---
+> 	if (bio)
+> 		bio_list_add(&entry->w_ctx.bios, bio);
+376,378c378
+< 	spin_lock_irq(&rb->s_lock);
+< 	bio_list_add(&entry->w_ctx.bios, bio);
+< 	spin_unlock_irq(&rb->s_lock);
+---
+> 	pblk_rb_sync_end(rb, NULL);
+380c380
+< 	return 1;
+---
+> 	return bio ? 1 : 0;
+419c419
+< 	if (pblk_rb_sync_point_set(rb, NULL, mem))
+---
+> 	if (pblk_rb_flush_point_set(rb, NULL, mem))
+443c443
+< 		if (pblk_rb_sync_point_set(&pblk->rwb, bio, mem))
+---
+> 		if (pblk_rb_flush_point_set(&pblk->rwb, bio, mem))
+609,623d608
+< 		if (flags & PBLK_FLUSH_ENTRY) {
+< 			unsigned int sync_point;
+< 
+< 			sync_point = READ_ONCE(rb->sync_point);
+< 			if (sync_point == pos) {
+< 				/* Protect syncs */
+< 				smp_store_release(&rb->sync_point, EMPTY_ENTRY);
+< 			}
+< 
+< 			flags &= ~PBLK_FLUSH_ENTRY;
+< #ifdef CONFIG_NVM_DEBUG
+< 			atomic_dec(&rb->inflight_sync_point);
+< #endif
+< 		}
+< 
+733,735c718
+< 	unsigned int sync;
+< 	unsigned int i;
+< 
+---
+> 	unsigned int sync, flush_point;
+738a722
+> 	flush_point = READ_ONCE(rb->flush_point);
+740,741c724,735
+< 	for (i = 0; i < nr_entries; i++)
+< 		sync = (sync + 1) & (rb->nr_entries - 1);
+---
+> 	if (flush_point != EMPTY_ENTRY) {
+> 		unsigned int secs_to_flush;
+> 
+> 		secs_to_flush = pblk_rb_ring_count(flush_point, sync,
+> 					rb->nr_entries);
+> 		if (secs_to_flush < nr_entries) {
+> 			/* Protect flush points */
+> 			smp_store_release(&rb->flush_point, EMPTY_ENTRY);
+> 		}
+> 	}
+> 
+> 	sync = (sync + nr_entries) & (rb->nr_entries - 1);
+749c743,744
+< unsigned int pblk_rb_sync_point_count(struct pblk_rb *rb)
+---
+> /* Calculate how many sectors to submit up to the current flush point. */
+> unsigned int pblk_rb_flush_point_count(struct pblk_rb *rb)
+751,752c746,747
+< 	unsigned int subm, sync_point;
+< 	unsigned int count;
+---
+> 	unsigned int subm, sync, flush_point;
+> 	unsigned int submitted, to_flush;
+754,756c749,751
+< 	/* Protect syncs */
+< 	sync_point = smp_load_acquire(&rb->sync_point);
+< 	if (sync_point == EMPTY_ENTRY)
+---
+> 	/* Protect flush points */
+> 	flush_point = smp_load_acquire(&rb->flush_point);
+> 	if (flush_point == EMPTY_ENTRY)
+758a754,756
+> 	/* Protect syncs */
+> 	sync = smp_load_acquire(&rb->sync);
+> 
+759a758
+> 	submitted = pblk_rb_ring_count(subm, sync, rb->nr_entries);
+762c761
+< 	count = pblk_rb_ring_count(sync_point, subm, rb->nr_entries) + 1;
+---
+> 	to_flush = pblk_rb_ring_count(flush_point, sync, rb->nr_entries) + 1;
+764c763
+< 	return count;
+---
+> 	return (submitted < to_flush) ? (to_flush - submitted) : 0;
+804c803
+< 				(rb->sync_point == EMPTY_ENTRY)) {
+---
+> 				(rb->flush_point == EMPTY_ENTRY)) {
+851c850
+< 	if (rb->sync_point != EMPTY_ENTRY)
+---
+> 	if (rb->flush_point != EMPTY_ENTRY)
+860c859
+< 			atomic_read(&rb->inflight_sync_point),
+---
+> 			atomic_read(&rb->inflight_flush_point),
+864c863
+< 			rb->sync_point,
+---
+> 			rb->flush_point,
+867c866
+< 			pblk_rb_sync_point_count(rb),
+---
+> 			pblk_rb_flush_point_count(rb),
+878c877
+< 			atomic_read(&rb->inflight_sync_point),
+---
+> 			atomic_read(&rb->inflight_flush_point),
+884c883
+< 			pblk_rb_sync_point_count(rb),
+---
+> 			pblk_rb_flush_point_count(rb),
+diff ./pblk-read.c /home/tak/jolp_l/jutak/linux/drivers/lightnvm/pblk-read.c
+144c144
+< 		line = &pblk->lines[pblk_dev_ppa_to_line(ppa)];
+---
+> 		line = &pblk->lines[pblk_ppa_to_line(ppa)];
+160a161
+> 	struct nvm_tgt_dev *dev = pblk->dev;
+162a164,166
+> 	unsigned long start_time = r_ctx->start_time;
+> 
+> 	generic_end_io_acct(dev->q, READ, &pblk->disk->part0, start_time);
+196,198c200,202
+< static int pblk_fill_partial_read_bio(struct pblk *pblk, struct nvm_rq *rqd,
+< 				      unsigned int bio_init_idx,
+< 				      unsigned long *read_bitmap)
+---
+> static int pblk_partial_read_bio(struct pblk *pblk, struct nvm_rq *rqd,
+> 				 unsigned int bio_init_idx,
+> 				 unsigned long *read_bitmap)
+273c277
+< 		int line_id = pblk_dev_ppa_to_line(rqd->ppa_list[i]);
+---
+> 		int line_id = pblk_ppa_to_line(rqd->ppa_list[i]);
+308a313,314
+> 	pr_err("pblk: failed to perform partial read\n");
+> 
+359a366
+> 	struct request_queue *q = dev->q;
+374a382,383
+> 	generic_start_io_acct(q, READ, bio_sectors(bio), &pblk->disk->part0);
+> 
+385a395
+> 	r_ctx->start_time = jiffies;
+425c435
+< 			return NVM_IO_ERR;
+---
+> 			goto fail_end_io;
+436c446
+< 			return ret;
+---
+> 			goto fail_end_io;
+445,451c455
+< 	ret = pblk_fill_partial_read_bio(pblk, rqd, bio_init_idx, &read_bitmap);
+< 	if (ret) {
+< 		pr_err("pblk: failed to perform partial read\n");
+< 		return ret;
+< 	}
+< 
+< 	return NVM_IO_OK;
+---
+> 	return pblk_partial_read_bio(pblk, rqd, bio_init_idx, &read_bitmap);
+454a459,461
+> 	return ret;
+> fail_end_io:
+> 	__pblk_end_io_read(pblk, rqd, false);
+diff ./pblk-recovery.c /home/tak/jolp_l/jutak/linux/drivers/lightnvm/pblk-recovery.c
+114c114
+< __le64 *pblk_recov_get_lba_list(struct pblk *pblk, struct line_emeta *emeta_buf)
+---
+> int pblk_recov_check_emeta(struct pblk *pblk, struct line_emeta *emeta_buf)
+120c120
+< 		return NULL;
+---
+> 		return 1;
+123c123
+< 		return NULL;
+---
+> 		return 1;
+125c125
+< 	return emeta_to_lbas(pblk, emeta_buf);
+---
+> 	return 0;
+140c140
+< 	lba_list = pblk_recov_get_lba_list(pblk, emeta_buf);
+---
+> 	lba_list = emeta_to_lbas(pblk, emeta_buf);
+152c152
+< 		ppa = addr_to_pblk_ppa(pblk, i, line->id);
+---
+> 		ppa = addr_to_gen_ppa(pblk, i, line->id);
+191c191
+< 				nr_bb * geo->sec_per_blk;
+---
+> 				nr_bb * geo->sec_per_chk;
+266c266
+< 		pos = pblk_dev_ppa_to_pos(geo, ppa);
+---
+> 		pos = pblk_ppa_to_pos(geo, ppa);
+271c271
+< 			pos = pblk_dev_ppa_to_pos(geo, ppa);
+---
+> 			pos = pblk_ppa_to_pos(geo, ppa);
+291c291
+< 	if (rqd->error) {
+---
+> 	if (rqd->error && rqd->error != NVM_RSP_WARN_HIGHECC) {
+414c414
+< 		ppa = addr_to_pblk_ppa(pblk, w_ptr, line->id);
+---
+> 		ppa = addr_to_gen_ppa(pblk, w_ptr, line->id);
+419c419
+< 			ppa = addr_to_pblk_ppa(pblk, w_ptr, line->id);
+---
+> 			ppa = addr_to_gen_ppa(pblk, w_ptr, line->id);
+544c544
+< 		pos = pblk_dev_ppa_to_pos(geo, ppa);
+---
+> 		pos = pblk_ppa_to_pos(geo, ppa);
+549c549
+< 			pos = pblk_dev_ppa_to_pos(geo, ppa);
+---
+> 			pos = pblk_ppa_to_pos(geo, ppa);
+675c675
+< 		pos = pblk_dev_ppa_to_pos(geo, ppa);
+---
+> 		pos = pblk_ppa_to_pos(geo, ppa);
+680c680
+< 			pos = pblk_dev_ppa_to_pos(geo, ppa);
+---
+> 			pos = pblk_ppa_to_pos(geo, ppa);
+820c820
+< 		ppa = addr_to_pblk_ppa(pblk, emeta_start, line->id);
+---
+> 		ppa = addr_to_gen_ppa(pblk, emeta_start, line->id);
+940a941,945
+> 		if (pblk_recov_check_emeta(pblk, line->emeta->buf)) {
+> 			pblk_recov_l2p_from_oob(pblk, line);
+> 			goto next;
+> 		}
+> 
+987c992
+< 	if (is_next) {
+---
+> 	if (is_next)
+989,990d993
+< 		pblk_rl_free_lines_dec(&pblk->rl, l_mg->data_next);
+< 	}
+diff ./pblk-rl.c /home/tak/jolp_l/jutak/linux/drivers/lightnvm/pblk-rl.c
+92,99c92,98
+< /*
+<  * We check for (i) the number of free blocks in the current LUN and (ii) the
+<  * total number of free blocks in the pblk instance. This is to even out the
+<  * number of free blocks on each LUN when GC kicks in.
+<  *
+<  * Only the total number of free blocks is used to configure the rate limiter.
+<  */
+< void pblk_rl_update_rates(struct pblk_rl *rl)
+---
+> unsigned long pblk_rl_nr_user_free_blks(struct pblk_rl *rl)
+> {
+> 	return atomic_read(&rl->free_user_blocks);
+> }
+> 
+> static void __pblk_rl_update_rates(struct pblk_rl *rl,
+> 				   unsigned long free_blocks)
+102d100
+< 	unsigned long free_blocks = pblk_rl_nr_free_blks(rl);
+134a133,137
+> void pblk_rl_update_rates(struct pblk_rl *rl)
+> {
+> 	__pblk_rl_update_rates(rl, pblk_rl_nr_user_free_blks(rl));
+> }
+> 
+137a141
+> 	int free_blocks;
+140c144,146
+< 	pblk_rl_update_rates(rl);
+---
+> 	free_blocks = atomic_add_return(blk_in_line, &rl->free_user_blocks);
+> 
+> 	__pblk_rl_update_rates(rl, free_blocks);
+143c149,150
+< void pblk_rl_free_lines_dec(struct pblk_rl *rl, struct pblk_line *line)
+---
+> void pblk_rl_free_lines_dec(struct pblk_rl *rl, struct pblk_line *line,
+> 			    bool used)
+145a153
+> 	int free_blocks;
+148c156,163
+< 	pblk_rl_update_rates(rl);
+---
+> 
+> 	if (used)
+> 		free_blocks = atomic_sub_return(blk_in_line,
+> 							&rl->free_user_blocks);
+> 	else
+> 		free_blocks = atomic_read(&rl->free_user_blocks);
+> 
+> 	__pblk_rl_update_rates(rl, free_blocks);
+176a192,194
+> 	struct nvm_tgt_dev *dev = pblk->dev;
+> 	struct nvm_geo *geo = &dev->geo;
+> 	struct pblk_line_mgmt *l_mg = &pblk->l_mg;
+178a197,198
+> 	int sec_meta, blk_meta;
+> 
+181,182c201,203
+< 	rl->high = rl->total_blocks / PBLK_USER_HIGH_THRS;
+< 	rl->high_pw = get_count_order(rl->high);
+---
+> 	/* Consider sectors used for metadata */
+> 	sec_meta = (lm->smeta_sec + lm->emeta_sec[0]) * l_mg->nr_free_lines;
+> 	blk_meta = DIV_ROUND_UP(sec_meta, geo->sec_per_chk);
+184,186c205,206
+< 	rl->low = rl->total_blocks / PBLK_USER_LOW_THRS;
+< 	if (rl->low < min_blocks)
+< 		rl->low = min_blocks;
+---
+> 	rl->high = pblk->op_blks - blk_meta - lm->blk_per_line;
+> 	rl->high_pw = get_count_order(rl->high);
+diff ./pblk-sysfs.c /home/tak/jolp_l/jutak/linux/drivers/lightnvm/pblk-sysfs.c
+31c31
+< 	for (i = 0; i < geo->nr_luns; i++) {
+---
+> 	for (i = 0; i < geo->all_luns; i++) {
+52c52
+< 	int free_blocks, total_blocks;
+---
+> 	int free_blocks, free_user_blocks, total_blocks;
+56c56,57
+< 	free_blocks = atomic_read(&pblk->rl.free_blocks);
+---
+> 	free_blocks = pblk_rl_nr_free_blks(&pblk->rl);
+> 	free_user_blocks = pblk_rl_nr_user_free_blks(&pblk->rl);
+67c68
+< 		"u:%u/%u,gc:%u/%u(%u/%u)(stop:<%u,full:>%u,free:%d/%d)-%d\n",
+---
+> 		"u:%u/%u,gc:%u/%u(%u)(stop:<%u,full:>%u,free:%d/%d/%d)-%d\n",
+74d74
+< 				pblk->rl.low,
+76a77
+> 				free_user_blocks,
+241c242
+< 		geo->nr_luns, lm->blk_per_line, lm->sec_per_line);
+---
+> 		geo->all_luns, lm->blk_per_line, lm->sec_per_line);
+290c291
+< 					geo->sec_per_blk);
+---
+> 					geo->sec_per_chk);
+diff ./pblk-write.c /home/tak/jolp_l/jutak/linux/drivers/lightnvm/pblk-write.c
+23a24
+> 	struct pblk_rb *rwb = &pblk->rwb;
+28a30,44
+> 		int pos = c_ctx->sentry + i;
+> 		int flags;
+> 
+> 		w_ctx = pblk_rb_w_ctx(rwb, pos);
+> 		flags = READ_ONCE(w_ctx->flags);
+> 
+> 		if (flags & PBLK_FLUSH_ENTRY) {
+> 			flags &= ~PBLK_FLUSH_ENTRY;
+> 			/* Release flags on context. Protect from writes */
+> 			smp_store_release(&w_ctx->flags, flags);
+> 
+> #ifdef CONFIG_NVM_DEBUG
+> 			atomic_dec(&rwb->inflight_flush_point);
+> #endif
+> 		}
+30d45
+< 		w_ctx = pblk_rb_w_ctx(&pblk->rwb, c_ctx->sentry + i);
+442c457
+< 	ppa_set_empty(&erase_ppa);
+---
+> 	pblk_ppa_set_empty(&erase_ppa);
+460c475
+< 	if (!ppa_empty(erase_ppa)) {
+---
+> 	if (!pblk_ppa_empty(erase_ppa)) {
+511c526
+< 	secs_to_flush = pblk_rb_sync_point_count(&pblk->rwb);
+---
+> 	secs_to_flush = pblk_rb_flush_point_count(&pblk->rwb);
+Only in .: rrpc.c
+Only in .: rrpc.h
