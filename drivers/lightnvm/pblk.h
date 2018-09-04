@@ -34,6 +34,7 @@
 /* Run only GC if less than 1/X blocks are free */
 #define GC_LIMIT_INVERSE 5
 #define GC_TIME_MSECS 1000
+#define GC_MID_TIME_MSECS 1500
 
 #define PBLK_SECTOR (512)
 #define PBLK_EXPOSED_PAGE_SIZE (4096)
@@ -255,24 +256,28 @@ struct pblk_gc {
 
 struct pblk_rl {
 	unsigned int high;	/* Upper threshold for rate limiter (free run -
-				 * user I/O rate limiter
-				 */
+						 * user I/O rate limiter
+						 */
+	unsigned int mid;	/* Mid threshold for rate limiter 
+						 */
 	unsigned int low;	/* Lower threshold for rate limiter (user I/O
-				 * rate limiter - stall)
-				 */
+						 * rate limiter - stall)
+						 */
 	unsigned int high_pw;	/* High rounded up as a power of 2 */
+	unsigned int mid_pw;	/* High rounded up as a power of 2 */
 
 #define PBLK_USER_HIGH_THRS 8	/* Begin write limit at 12% available blks */
+#define PBLK_USER_MID_THRS 9	/* Mideum GC at 11% available blks */
 #define PBLK_USER_LOW_THRS 10	/* Aggressive GC at 10% available blocks */
 
 	int rb_windows_pw;	/* Number of rate windows in the write buffer
-				 * given as a power-of-2. This guarantees that
-				 * when user I/O is being rate limited, there
-				 * will be reserved enough space for the GC to
-				 * place its payload. A window is of
-				 * pblk->max_write_pgs size, which in NVMe is
-				 * 64, i.e., 256kb.
-				 */
+						 * given as a power-of-2. This guarantees that
+						 * when user I/O is being rate limited, there
+						 * will be reserved enough space for the GC to
+						 * place its payload. A window is of
+				 		 * pblk->max_write_pgs size, which in NVMe is
+						 * 64, i.e., 256kb.
+						 */
 	int rb_budget;		/* Total number of entries available for I/O */
 	int rb_user_max;	/* Max buffer entries available for user I/O */
 	int rb_gc_max;		/* Max buffer entries available for GC I/O */

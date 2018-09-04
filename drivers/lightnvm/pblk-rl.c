@@ -106,8 +106,22 @@ void pblk_rl_update_rates(struct pblk_rl *rl)
 		rl->rb_user_max = max;
 		rl->rb_gc_max = 0;
 		rl->rb_state = PBLK_RL_HIGH;
-	} else if (free_blocks < rl->high) {
+	} else if (free_blocks < rl->high && free_blocks >= rl->mid) {
 		int shift = rl->high_pw - rl->rb_windows_pw;
+		int user_windows = free_blocks >> shift;
+		int user_max = user_windows << PBLK_MAX_REQ_ADDRS_PW;
+
+		rl->rb_user_max = user_max;
+		rl->rb_gc_max = max - user_max;
+
+		if (free_blocks <= rl->rsv_blocks) {
+			rl->rb_user_max = 0;
+			rl->rb_gc_max = max;
+		}
+
+		rl->rb_state = PBLK_RL_MID;
+	} else if (free_blocks < rl->mid) {
+		int shift = rl->mid_pw - rl->rb_windows_pw;
 		int user_windows = free_blocks >> shift;
 		int user_max = user_windows << PBLK_MAX_REQ_ADDRS_PW;
 
@@ -180,6 +194,9 @@ void pblk_rl_init(struct pblk_rl *rl, int budget)
 
 	rl->high = rl->total_blocks / PBLK_USER_HIGH_THRS;
 	rl->high_pw = get_count_order(rl->high);
+
+	rl->mid = rl->total_blocks / PBLK_USER_MID_THRS;
+	rl->mid_pw = get_count_order(rl->mid);
 
 	rl->low = rl->total_blocks / PBLK_USER_LOW_THRS;
 	if (rl->low < min_blocks)

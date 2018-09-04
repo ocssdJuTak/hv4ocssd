@@ -86,6 +86,7 @@ static void pblk_put_line_back(struct pblk *pblk, struct pblk_line *line)
 	}
 }
 
+// work를 하나 받아서, 해당 work를 
 static void pblk_gc_line_ws(struct work_struct *work)
 {
 	struct pblk_line_ws *gc_rq_ws = container_of(work,
@@ -311,8 +312,15 @@ static void pblk_gc_kick(struct pblk *pblk)
 	/* If we're shutting down GC, let's not start it up again */
 	if (gc->gc_enabled) {
 		wake_up_process(gc->gc_ts);
-		mod_timer(&gc->gc_timer,
-			  jiffies + msecs_to_jiffies(GC_TIME_MSECS));
+		if (gc->rl->rb_state == PBLK_RL_MID) {
+			//TODO: timer change
+			mod_timer(&gc->gc_timer,
+					  jiffies + msecs_to_jiffies(GC_MID_TIME_MSECS));
+		}
+		else if (gc->rl->rb_state == PBLK_RL_LOW) {
+			mod_timer(&gc->gc_timer,
+					  jiffies + msecs_to_jiffies(GC_TIME_MSECS));
+		}
 	}
 }
 
@@ -628,7 +636,7 @@ int pblk_gc_init(struct pblk *pblk)
 	gc->gc_active = 0;
 	gc->gc_forced = 0;
 	gc->gc_enabled = 1;
-	gc->w_entries = 0;			// TODO: w_entries의 의미?
+	gc->w_entries = 0;			// w_entries : w_list의 원소 수
 	atomic_set(&gc->read_inflight_gc, 0);
 	atomic_set(&gc->pipeline_gc, 0);
 
