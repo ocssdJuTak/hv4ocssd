@@ -312,12 +312,12 @@ static void pblk_gc_kick(struct pblk *pblk)
 	/* If we're shutting down GC, let's not start it up again */
 	if (gc->gc_enabled) {
 		wake_up_process(gc->gc_ts);
-		if (gc->rl->rb_state == PBLK_RL_MID) {
+		if (pblk->rl.rb_state == PBLK_RL_MID) {
 			//TODO: timer change
 			mod_timer(&gc->gc_timer,
 					  jiffies + msecs_to_jiffies(GC_MID_TIME_MSECS));
 		}
-		else if (gc->rl->rb_state == PBLK_RL_LOW) {
+		else if (pblk->rl.rb_state == PBLK_RL_LOW) {
 			mod_timer(&gc->gc_timer,
 					  jiffies + msecs_to_jiffies(GC_TIME_MSECS));
 		}
