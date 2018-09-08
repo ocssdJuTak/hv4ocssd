@@ -26,6 +26,43 @@ static void pblk_gc_free_gc_rq(struct pblk_gc_rq *gc_rq)
 	kfree(gc_rq);
 }
 
+// write를 절반만 수행
+static int pblk_gc_half_write(struct pblk *pblk)
+{
+	struct pblk_gc *gc = &pblk->gc;
+	struct pblk_gc_rq *gc_rq, *tgc_rq;
+
+	LIST_HEAD(w_list);
+
+	spin_lock(&gc->w_lock);
+
+	if (list_empty(&gc->w_list)) {
+		spin_unlock(&gc->w_lock);
+		return 1;
+	}
+
+	// write할 것이 있다면 현재 gc->w_lock을 획득한 상태
+	int cnt = gc->w_entries / 2;
+	list_head *w_entry = gc->w_list.prev;
+	while(cnt--) {
+		w_entry = w_entry->next;
+		gc->w_entries--;
+	}
+
+	list_cut_position(&w_list, &gc->w_list, w_entry);
+	
+	spin_unlock(&gc->w_lock);
+
+	list_for_each_entry_safe(gc_rq, tgc_rq, &w_list, list) {		// tgc_rq == temporary_gc_rq
+		pblk_write_gc_to_cache(pblk, gc_rq);
+		list_del(&gc_rq->list);
+		kref_put(&gc_rq->line->ref, pblk_line_put);
+		pblk_gc_free_gc_rq(gc_rq);
+	}
+
+	return 0;
+}
+
 // pblk->gc에서 w_list에 있는 요청을 꺼내서 gc_write를 실행
 static int pblk_gc_write(struct pblk *pblk)
 {
@@ -486,15 +523,27 @@ static int pblk_gc_ts(void *data)
 	return 0;
 }
 
+// modified writer task
 static int pblk_gc_writer_ts(void *data)
 {
 	struct pblk *pblk = data;
+	
+	if (data->rl.rb_state == PBLK_RL_HIGH) {
+		while (!kthread_should_stop()) {
+			if (!pblk_gc_write(pblk))
+				continue;
+			set_current_state(TASK_INTERRUPTIBLE);
+			io_schedule();
+		}
+	}
 
-	while (!kthread_should_stop()) {
-		if (!pblk_gc_write(pblk))
-			continue;
-		set_current_state(TASK_INTERRUPTIBLE);
-		io_schedule();
+	if (data->rl.rb_state == PBLK_RL_MID) {
+		while (!kthread_should_stop()) {
+			if (!pblk_gc_half_write(pblk))
+				continue;
+			set_current_state(TASK_INTERRUPTIBLE);
+			io_schedule();
+		}
 	}
 
 	return 0;
